@@ -1,0 +1,25 @@
+#ifndef JGD_TRANSPORT_H
+#define JGD_TRANSPORT_H
+
+#include <stddef.h>
+
+typedef struct {
+    int fd;
+    char socket_path[512];  /* URI (tcp://host:port, unix:///path, npipe:////./pipe/name) or raw path */
+    int connected;
+    char readbuf[4096];     /* persistent read buffer for bulk recv */
+    size_t readbuf_len;     /* valid bytes in readbuf */
+#ifdef _WIN32
+    void *pipe_handle;  /* HANDLE; INVALID_HANDLE_VALUE when unused */
+    void *overlap_event;  /* HANDLE for overlapped I/O event; NULL when unused */
+#endif
+} jgd_transport_t;
+
+void transport_init(jgd_transport_t *t);
+int transport_connect(jgd_transport_t *t);
+int transport_send(jgd_transport_t *t, const char *data, size_t len);
+int transport_has_data(jgd_transport_t *t);
+int transport_recv_line(jgd_transport_t *t, char *buf, size_t bufsize, int timeout_ms);
+void transport_close(jgd_transport_t *t);
+
+#endif

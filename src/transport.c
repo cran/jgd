@@ -1,0 +1,669 @@
+#include "transport.h"
+#include "cJSON.h"
+
+#include <R.h>
+#include <Rinternals.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+typedef SOCKET sock_t;
+#define SOCK_INVALID INVALID_SOCKET
+#define SOCK_CLOSE closesocket
+#define SOCK_ERR WSAGetLastError()
+static int wsa_initialized = 0;
+static void ensure_wsa(void) {
+    if (!wsa_initialized) {
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2, 2), &wsa);
+        wsa_initialized = 1;
+    }
+}
+#else
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <strings.h>  /* strncasecmp */
+typedef int sock_t;
+#define SOCK_INVALID (-1)
+#define SOCK_CLOSE close
+#define SOCK_ERR errno
+#define ensure_wsa()
+#endif
+
+/*
+ * Parse a TCP address from socket_path into a sockaddr_in.
+ * Format: "tcp://host:port" (host may be IP or "localhost")
+ * Returns 0 on success, -1 on failure.
+ */
+static int parse_tcp(const char *path, struct sockaddr_in *out) {
+    memset(out, 0, sizeof(*out));
+    out->sin_family = AF_INET;
+
+    if (strncmp(path, "tcp://", 6) == 0) {
+        const char *hp = path + 6;
+        const char *colon = strrchr(hp, ':');
+        if (!colon) return -1;
+
+        char host[256];
+        size_t hlen = (size_t)(colon - hp);
+        if (hlen == 0 || hlen >= sizeof(host)) return -1;
+        memcpy(host, hp, hlen);
+        host[hlen] = '\0';
+
+        int port = atoi(colon + 1);
+        if (port <= 0 || port > 65535) return -1;
+        out->sin_port = htons((unsigned short)port);
+
+        if (strcmp(host, "localhost") == 0) {
+            out->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        } else {
+            unsigned long ip = inet_addr(host);
+            if (ip == INADDR_NONE) return -1;
+            out->sin_addr.s_addr = ip;
+        }
+        return 0;
+    }
+
+    return -1;
+}
+
+#ifdef _WIN32
+/* Parse npipe:////./pipe/NAME (Docker-standard 4-slash form) → \\.\pipe\NAME.
+ * Returns 0 on success, -1 if not an npipe URI. */
+static int parse_npipe(const char *path, char *buf, size_t bufsize) {
+    const char *prefix = "npipe:////./pipe/";
+    size_t prefix_len = 17; /* strlen("npipe:////./pipe/") */
+    const char *name;
+
+    if (strncmp(path, prefix, prefix_len) != 0) {
+        return -1;
+    }
+    name = path + prefix_len;
+
+    /* "\\\\.\\pipe\\" is 9 characters; plus 1 for the terminating NUL. */
+    if (bufsize <= 10) return -1;
+
+    {
+        size_t name_len = strlen(name);
+        if (name_len == 0 || name_len > bufsize - 10) return -1;
+    }
+
+    snprintf(buf, bufsize, "\\\\.\\pipe\\%s", name);
+    return 0;
+}
+#endif
+
+void transport_init(jgd_transport_t *t) {
+    t->fd = (int)SOCK_INVALID;
+    t->socket_path[0] = '\0';
+    t->connected = 0;
+    t->readbuf_len = 0;
+#ifdef _WIN32
+    t->pipe_handle = INVALID_HANDLE_VALUE;
+    t->overlap_event = NULL;
+#endif
+}
+
+/* Build the discovery file path: <cache_dir>/jgd/discovery.json
+ * - Linux:   $XDG_CACHE_HOME/jgd/discovery.json or ~/.cache/jgd/discovery.json
+ * - macOS:   ~/Library/Caches/jgd/discovery.json
+ * - Windows: %LOCALAPPDATA%/jgd/discovery.json
+ * Returns 0 on success, -1 if the path cannot be determined. */
+static int discovery_path(char *out, size_t outsize) {
+    int n;
+#ifdef _WIN32
+    const char *base = getenv("LOCALAPPDATA");
+    if (!base || !base[0]) {
+        const char *home = getenv("USERPROFILE");
+        if (!home || !home[0]) return -1;
+        n = snprintf(out, outsize, "%s\\AppData\\Local\\jgd\\discovery.json", home);
+    } else {
+        n = snprintf(out, outsize, "%s\\jgd\\discovery.json", base);
+    }
+#elif defined(__APPLE__)
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) return -1;
+    n = snprintf(out, outsize, "%s/Library/Caches/jgd/discovery.json", home);
+#else
+    const char *xdg = getenv("XDG_CACHE_HOME");
+    if (xdg && xdg[0]) {
+        n = snprintf(out, outsize, "%s/jgd/discovery.json", xdg);
+    } else {
+        const char *home = getenv("HOME");
+        if (!home || !home[0]) return -1;
+        n = snprintf(out, outsize, "%s/.cache/jgd/discovery.json", home);
+    }
+#endif
+    if (n < 0 || (size_t)n >= outsize) return -1;
+    return 0;
+}
+
+/* Read a JSON file at the given path and return parsed cJSON, or NULL.
+   Caller must cJSON_Delete the result. */
+static cJSON *read_json_file(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0 || fsize > 65536) { fclose(f); return NULL; }
+
+    char *content = (char *)malloc((size_t)fsize + 1);
+    if (!content) { fclose(f); return NULL; }
+    size_t nread = fread(content, 1, (size_t)fsize, f);
+    fclose(f);
+    content[nread] = '\0';
+
+    cJSON *json = cJSON_Parse(content);
+    free(content);
+    return json;
+}
+
+static int discover_socket_path(char *out, size_t outsize) {
+    char disc_path[1024];
+    if (discovery_path(disc_path, sizeof(disc_path)) != 0) return -1;
+    cJSON *json = read_json_file(disc_path);
+    if (!json) return -1;
+
+    cJSON *sp = cJSON_GetObjectItem(json, "socketPath");
+    if (cJSON_IsString(sp) && sp->valuestring) {
+        size_t plen = strlen(sp->valuestring);
+        if (plen > 0 && plen < outsize) {
+            memcpy(out, sp->valuestring, plen + 1);
+            cJSON_Delete(json);
+            return 0;
+        }
+    }
+    cJSON_Delete(json);
+    return -1;
+}
+
+/* Called from R: .Call(C_jgd_discover, path)
+   Reads the discovery file at the given path and returns all fields
+   as a named list, or NULL if the file is missing or invalid. */
+SEXP C_jgd_discover(SEXP s_path) {
+    if (TYPEOF(s_path) != STRSXP || Rf_length(s_path) != 1)
+        Rf_error("'path' must be a length-1 character vector");
+    if (STRING_ELT(s_path, 0) == NA_STRING)
+        Rf_error("'path' cannot be NA");
+    const char *path = CHAR(STRING_ELT(s_path, 0));
+    cJSON *json = read_json_file(path);
+    if (!json) return R_NilValue;
+
+    /* socketPath is required */
+    cJSON *sp = cJSON_GetObjectItem(json, "socketPath");
+    if (!cJSON_IsString(sp) || !sp->valuestring || !sp->valuestring[0]) {
+        cJSON_Delete(json);
+        return R_NilValue;
+    }
+
+    /* serverName is required */
+    cJSON *sn = cJSON_GetObjectItem(json, "serverName");
+    if (!cJSON_IsString(sn) || !sn->valuestring || !sn->valuestring[0]) {
+        cJSON_Delete(json);
+        return R_NilValue;
+    }
+
+    /* pid is required and must be a positive integer */
+    cJSON *pidj = cJSON_GetObjectItem(json, "pid");
+    if (!cJSON_IsNumber(pidj) ||
+        pidj->valueint <= 0 ||
+        (double)pidj->valueint != pidj->valuedouble) {
+        cJSON_Delete(json);
+        return R_NilValue;
+    }
+
+    /* Build result: list(server_name, socket_path, pid, server_info) */
+    SEXP result = PROTECT(Rf_allocVector(VECSXP, 4));
+    SEXP names = PROTECT(Rf_allocVector(STRSXP, 4));
+    SET_STRING_ELT(names, 0, Rf_mkChar("server_name"));
+    SET_STRING_ELT(names, 1, Rf_mkChar("socket_path"));
+    SET_STRING_ELT(names, 2, Rf_mkChar("pid"));
+    SET_STRING_ELT(names, 3, Rf_mkChar("server_info"));
+    Rf_setAttrib(result, R_NamesSymbol, names);
+
+    SET_VECTOR_ELT(result, 0, PROTECT(Rf_mkString(sn->valuestring)));
+    SET_VECTOR_ELT(result, 1, PROTECT(Rf_mkString(sp->valuestring)));
+    SET_VECTOR_ELT(result, 2, PROTECT(Rf_ScalarInteger(pidj->valueint)));
+
+    /* Build named character vector from serverInfo object */
+    cJSON *info = cJSON_GetObjectItem(json, "serverInfo");
+    if (cJSON_IsObject(info)) {
+        int np = 0;
+        cJSON *child = info->child;
+        while (child) { if (cJSON_IsString(child) && child->string && child->valuestring) np++; child = child->next; }
+
+        SEXP info_vec = PROTECT(Rf_allocVector(STRSXP, np));
+        SEXP info_names = PROTECT(Rf_allocVector(STRSXP, np));
+        int i = 0;
+        child = info->child;
+        while (child) {
+            if (cJSON_IsString(child) && child->string && child->valuestring) {
+                SET_STRING_ELT(info_names, i, Rf_mkChar(child->string));
+                SET_STRING_ELT(info_vec, i, Rf_mkChar(child->valuestring));
+                i++;
+            }
+            child = child->next;
+        }
+        Rf_setAttrib(info_vec, R_NamesSymbol, info_names);
+        SET_VECTOR_ELT(result, 3, info_vec);
+        UNPROTECT(7);
+    } else {
+        SET_VECTOR_ELT(result, 3, PROTECT(Rf_allocVector(STRSXP, 0)));
+        UNPROTECT(6);
+    }
+
+    cJSON_Delete(json);
+    return result;
+}
+
+static int try_connect(jgd_transport_t *t) {
+    ensure_wsa();
+
+    /* Try TCP: tcp://host:port */
+    struct sockaddr_in tcp_addr;
+    if (parse_tcp(t->socket_path, &tcp_addr) == 0) {
+        sock_t s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s == SOCK_INVALID) return -1;
+
+        if (connect(s, (struct sockaddr *)&tcp_addr, sizeof(tcp_addr)) != 0) {
+            SOCK_CLOSE(s);
+            return -1;
+        }
+
+        t->fd = (int)s;
+        t->connected = 1;
+        return 0;
+    }
+
+#ifndef _WIN32
+    /* Unix domain socket: unix:///path, unix://localhost/path, or raw /path */
+    const char *upath = t->socket_path;
+    if (strncasecmp(upath, "unix://localhost/", 17) == 0)
+        upath += 16;  /* keep leading "/" */
+    else if (strncmp(upath, "unix:///", 8) == 0)
+        upath += 7;
+    else if (strncmp(upath, "unix://", 7) == 0)
+        return -1;  /* reject non-empty, non-localhost authority */
+    if (*upath == '\0') return -1;
+
+    size_t pathlen = strlen(upath);
+    if (pathlen >= sizeof(((struct sockaddr_un *)0)->sun_path))
+        return -1;
+
+    sock_t s = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s == SOCK_INVALID) return -1;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, upath, pathlen + 1);
+
+    if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        SOCK_CLOSE(s);
+        return -1;
+    }
+
+    t->fd = (int)s;
+    t->connected = 1;
+    return 0;
+#else
+    /* Windows: try named pipe, otherwise fail */
+    {
+        char pipe_buf[512];
+        if (parse_npipe(t->socket_path, pipe_buf, sizeof(pipe_buf)) == 0) {
+            HANDLE h = INVALID_HANDLE_VALUE;
+            const int max_attempts = 5;
+            int attempt;
+            for (attempt = 0; attempt < max_attempts; ++attempt) {
+                h = CreateFileA(
+                    pipe_buf,
+                    GENERIC_READ | GENERIC_WRITE,
+                    0, NULL, OPEN_EXISTING,
+                    FILE_FLAG_OVERLAPPED, NULL);
+                if (h != INVALID_HANDLE_VALUE) break;
+                if (GetLastError() != ERROR_PIPE_BUSY) return -1;
+                if (!WaitNamedPipeA(pipe_buf, 500)) {
+                    if (GetLastError() != ERROR_SEM_TIMEOUT) return -1;
+                }
+            }
+            if (h == INVALID_HANDLE_VALUE) return -1;
+            DWORD mode = PIPE_READMODE_BYTE;
+            if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
+                CloseHandle(h);
+                return -1;
+            }
+            {
+                HANDLE evt = CreateEvent(NULL, TRUE, FALSE, NULL);
+                if (!evt) { CloseHandle(h); return -1; }
+                t->overlap_event = evt;
+            }
+            t->pipe_handle = h;
+            t->connected = 1;
+            return 0;
+        }
+    }
+    return -1;
+#endif
+}
+
+int transport_connect(jgd_transport_t *t) {
+    if (t->connected) return 0;
+
+    if (t->socket_path[0] == '\0') {
+        if (discover_socket_path(t->socket_path, sizeof(t->socket_path)) != 0) {
+            REprintf("jgd: cannot find socket path. "
+                     "Pass socket= to jgd() or start the rendering server.\n");
+            return -1;
+        }
+    }
+
+    if (try_connect(t) == 0) return 0;
+
+    REprintf("jgd: connect(%s) failed: %d\n", t->socket_path, SOCK_ERR);
+    return -1;
+}
+
+int transport_send(jgd_transport_t *t, const char *data, size_t len) {
+    if (!t->connected) return -1;
+
+#ifdef _WIN32
+    if (t->pipe_handle != INVALID_HANDLE_VALUE) {
+        HANDLE h = (HANDLE)t->pipe_handle;
+        size_t sent = 0;
+        while (sent < len) {
+            OVERLAPPED ov = {0};
+            ov.hEvent = (HANDLE)t->overlap_event;
+            DWORD written = 0;
+            ResetEvent(ov.hEvent);
+            if (!WriteFile(h, data + sent, (DWORD)(len - sent), &written, &ov)) {
+                if (GetLastError() != ERROR_IO_PENDING) {
+                    t->connected = 0;
+                    return -1;
+                }
+                WaitForSingleObject(ov.hEvent, INFINITE);
+                if (!GetOverlappedResult(h, &ov, &written, FALSE)) {
+                    t->connected = 0;
+                    return -1;
+                }
+            }
+            if (written == 0) {
+                t->connected = 0;
+                return -1;
+            }
+            sent += written;
+        }
+        {
+            OVERLAPPED ov = {0};
+            ov.hEvent = (HANDLE)t->overlap_event;
+            char nl = '\n';
+            DWORD nw = 0;
+            ResetEvent(ov.hEvent);
+            if (!WriteFile(h, &nl, 1, &nw, &ov)) {
+                if (GetLastError() != ERROR_IO_PENDING) {
+                    t->connected = 0;
+                    return -1;
+                }
+                WaitForSingleObject(ov.hEvent, INFINITE);
+                if (!GetOverlappedResult(h, &ov, &nw, FALSE)) {
+                    t->connected = 0;
+                    return -1;
+                }
+            }
+            if (nw == 0) {
+                t->connected = 0;
+                return -1;
+            }
+        }
+        return 0;
+    }
+#endif
+
+    sock_t s = (sock_t)t->fd;
+    size_t sent = 0;
+    while (sent < len) {
+        int n = (int)send(s, data + sent, (int)(len - sent), 0);
+        if (n <= 0) {
+            t->connected = 0;
+            return -1;
+        }
+        sent += (size_t)n;
+    }
+    char nl = '\n';
+    if (send(s, &nl, 1, 0) <= 0) {
+        t->connected = 0;
+        return -1;
+    }
+    return 0;
+}
+
+int transport_has_data(jgd_transport_t *t) {
+    if (!t->connected) return 0;
+    /* A complete line already buffered? */
+    if (memchr(t->readbuf, '\n', t->readbuf_len) != NULL) return 1;
+#ifdef _WIN32
+    if (t->pipe_handle != INVALID_HANDLE_VALUE) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe((HANDLE)t->pipe_handle, NULL, 0, NULL, &avail, NULL)) {
+            t->connected = 0;
+            return 0;
+        }
+        return avail > 0 ? 1 : 0;
+    }
+#endif
+    sock_t s = (sock_t)t->fd;
+#ifndef _WIN32
+    struct pollfd pfd;
+    pfd.fd = s;
+    pfd.events = POLLIN;
+    return poll(&pfd, 1, 0) > 0 ? 1 : 0;
+#else
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(s, &readfds);
+    struct timeval tv = {0, 0};
+    return select(0, &readfds, NULL, NULL, &tv) > 0 ? 1 : 0;
+#endif
+}
+
+/* Extract one newline-terminated line from the read buffer.
+ * Returns line length (>= 0) on success, -1 if no complete line.
+ *
+ * TODO: When a line exceeds the caller's bufsize, the output is silently
+ * truncated while the full line is consumed from the internal buffer.
+ * The return value (truncated length) is indistinguishable from a normal
+ * short line, so callers cannot detect truncation.  Consider returning
+ * the original linelen or a distinct error code. */
+static int readbuf_extract_line(jgd_transport_t *t, char *buf, size_t bufsize) {
+    if (bufsize == 0) return -1;
+
+    char *nl = (char *)memchr(t->readbuf, '\n', t->readbuf_len);
+    if (!nl) return -1;
+
+    size_t linelen = (size_t)(nl - t->readbuf);
+    size_t copylen = linelen < bufsize - 1 ? linelen : bufsize - 1;
+    memcpy(buf, t->readbuf, copylen);
+    buf[copylen] = '\0';
+
+    /* Consume the line + newline from the buffer */
+    size_t consumed = linelen + 1;
+    t->readbuf_len -= consumed;
+    if (t->readbuf_len > 0) {
+        memmove(t->readbuf, t->readbuf + consumed, t->readbuf_len);
+    }
+    return (int)copylen;
+}
+
+int transport_recv_line(jgd_transport_t *t, char *buf, size_t bufsize, int timeout_ms) {
+    if (!t->connected) return -1;
+
+    /* Fast path: a complete line is already buffered */
+    int n = readbuf_extract_line(t, buf, bufsize);
+    if (n >= 0) return n;
+
+#ifdef _WIN32
+    if (t->pipe_handle != INVALID_HANDLE_VALUE) {
+        HANDLE h = (HANDLE)t->pipe_handle;
+        if (timeout_ms < 0) return -1;
+        DWORD remaining_ms = (DWORD)timeout_ms;
+
+        for (;;) {
+            size_t space = sizeof(t->readbuf) - t->readbuf_len;
+            if (space == 0) {
+                /* Buffer full without newline — protocol violation, disconnect */
+                t->readbuf_len = 0;
+                t->connected = 0;
+                return -1;
+            }
+
+            OVERLAPPED ov = {0};
+            ov.hEvent = (HANDLE)t->overlap_event;
+            DWORD nread = 0;
+            ResetEvent(ov.hEvent);
+            if (!ReadFile(h, t->readbuf + t->readbuf_len, (DWORD)space, &nread, &ov)) {
+                if (GetLastError() != ERROR_IO_PENDING) {
+                    t->connected = 0;
+                    return -1;
+                }
+                /* Wait for data with remaining timeout.
+                 * GetTickCount wraps every ~49.7 days, but DWORD subtraction
+                 * handles wraparound correctly for intervals < 49.7 days. */
+                DWORD t0 = GetTickCount();
+                DWORD wr = WaitForSingleObject(ov.hEvent, remaining_ms);
+                if (wr == WAIT_TIMEOUT) {
+                    CancelIo(h);
+                    /* Retrieve any partial bytes already read */
+                    if (GetOverlappedResult(h, &ov, &nread, TRUE) && nread > 0) {
+                        t->readbuf_len += nread;
+                    }
+                    return -1;
+                }
+                if (wr != WAIT_OBJECT_0) {
+                    CancelIo(h);
+                    GetOverlappedResult(h, &ov, &nread, TRUE);
+                    t->connected = 0;
+                    return -1;
+                }
+                if (!GetOverlappedResult(h, &ov, &nread, FALSE)) {
+                    t->connected = 0;
+                    return -1;
+                }
+                /* Update remaining timeout */
+                DWORD elapsed = GetTickCount() - t0;
+                if (elapsed >= remaining_ms)
+                    remaining_ms = 0;
+                else
+                    remaining_ms -= (DWORD)elapsed;
+            }
+
+            if (nread == 0) {
+                t->connected = 0;
+                return -1;
+            }
+            t->readbuf_len += nread;
+
+            n = readbuf_extract_line(t, buf, bufsize);
+            if (n >= 0) return n;
+
+            /* No complete line yet; if no timeout left, return */
+            if (remaining_ms == 0) return -1;
+        }
+    }
+#endif
+
+    sock_t s = (sock_t)t->fd;
+
+    /* Wait for initial data with the caller's timeout */
+#ifndef _WIN32
+    struct pollfd pfd;
+    pfd.fd = s;
+    pfd.events = POLLIN;
+    int pr = poll(&pfd, 1, timeout_ms);
+    if (pr < 0) {
+        int err = errno;
+        if (err == EINTR || err == EAGAIN) return -1;
+        t->connected = 0;
+        return -1;
+    }
+    if (pr == 0) return -1;
+#else
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(s, &readfds);
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int sr = select(0, &readfds, NULL, NULL, &tv);
+    if (sr < 0) {
+        int err = SOCK_ERR;
+        if (err == WSAEINTR || err == WSAEWOULDBLOCK) return -1;
+        t->connected = 0;
+        return -1;
+    }
+    if (sr == 0) return -1;
+#endif
+
+    /* Bulk-read until we have a complete line */
+    for (;;) {
+        size_t space = sizeof(t->readbuf) - t->readbuf_len;
+        if (space == 0) {
+            /* Buffer full without newline — protocol violation, disconnect */
+            t->readbuf_len = 0;
+            t->connected = 0;
+            return -1;
+        }
+
+        int r = (int)recv(s, t->readbuf + t->readbuf_len, (int)space, 0);
+        if (r < 0) {
+#ifndef _WIN32
+            int err = errno;
+            if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK) return -1;
+#else
+            int err = SOCK_ERR;
+            if (err == WSAEINTR || err == WSAEWOULDBLOCK) return -1;
+#endif
+            t->connected = 0;
+            return -1;
+        }
+        if (r == 0) {
+            t->connected = 0;
+            return -1;
+        }
+        t->readbuf_len += (size_t)r;
+
+        n = readbuf_extract_line(t, buf, bufsize);
+        if (n >= 0) return n;
+    }
+}
+
+void transport_close(jgd_transport_t *t) {
+#ifdef _WIN32
+    if (t->pipe_handle != INVALID_HANDLE_VALUE) {
+        CancelIo((HANDLE)t->pipe_handle);
+        CloseHandle((HANDLE)t->pipe_handle);
+        t->pipe_handle = INVALID_HANDLE_VALUE;
+    }
+    if (t->overlap_event) {
+        CloseHandle((HANDLE)t->overlap_event);
+        t->overlap_event = NULL;
+    }
+#endif
+    if (t->fd != (int)SOCK_INVALID) {
+        SOCK_CLOSE((sock_t)t->fd);
+        t->fd = (int)SOCK_INVALID;
+    }
+    t->connected = 0;
+    t->readbuf_len = 0;
+}
