@@ -1,6 +1,6 @@
 Package: jgd
 Title: JSON Graphics Device
-Version: 0.1.0
+Version: 0.1.1
 Authors@R: c(
         person("Grant", "McDermott", role = c("aut", "cre"),
             email = "contact@grantmcdermott.com"),
@@ -20,18 +20,18 @@ Description: A graphics device that translates R plotting operations into JSON
 License: MIT + file LICENSE
 Copyright: file inst/COPYRIGHTS
 Encoding: UTF-8
-RoxygenNote: 7.3.3
 NeedsCompilation: yes
 Suggests: callr, ggplot2, jsonlite, processx, testthat (>= 3.0.0),
         withr
 URL: https://github.com/grantmcdermott/jgd
 BugReports: https://github.com/grantmcdermott/jgd/issues
 Config/testthat/edition: 3
-Packaged: 2026-04-29 04:44:11 UTC; gmcd
+Config/roxygen2/version: 8.0.0
+Packaged: 2026-06-30 21:36:51 UTC; gmcd
 Author: Grant McDermott [aut, cre],
   Tatsuya Shima [aut],
   Dave Gamble [cph] (cJSON library in src/cjson/),
   cJSON contributors [cph] (cJSON library in src/cjson/)
 Maintainer: Grant McDermott <contact@grantmcdermott.com>
 Repository: CRAN
-Date/Publication: 2026-04-29 19:00:07 UTC
+Date/Publication: 2026-06-30 23:40:02 UTC

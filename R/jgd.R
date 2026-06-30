@@ -15,12 +15,13 @@
 #' It is important to note that `jgd()` does not display any plots; it only
 #' streams them (i.e., converts them to a format that a JSON renderer
 #' understands). To actually _display_ your plots with `jgd`, you'll need an
-#' appropriate frontend. We provide two official renderers, both available for
-#' install from the project repository:
-#' <https://github.com/grantmcdermott/jgd>.
+#' appropriate frontend. Two official renderers are available:
 #'
-#' - **VS Code extension.** An integrated plot pane for VS Code.
-#' - **Deno server.** A standalone browser-based renderer.
+#' - **VS Code.** Native `jgd` support is built into the VS Code R extension
+#'   (<https://github.com/REditorSupport/vscode-R>), which handles device
+#'   activation for you.
+#' - **Deno server.** A standalone browser-based renderer, available from the
+#'   project repository: <https://github.com/grantmcdermott/jgd>.
 #'
 #' Users aren't limited to these two options. The `jgd` protocol is deliberately
 #' frontend-agnostic; you can render plots with any client that reads JSONL
@@ -32,7 +33,15 @@
 #' frame-level diagnostic output on stderr (via `REprintf`).  This logs
 #' details about `newPage`, `flush_frame`, and `poll_resize` events, which
 #' is useful for diagnosing resize/replay issues.
+#' @section Protocol specification:
+#' The jgd protocol is a simple, versioned JSONL wire format designed to be
+#' frontend-agnostic. You can use it to build your own renderer (e.g., for
+#' Neovim, Emacs, or a custom web app). See [`jgd_spec`] for the complete
+#' specification covering transports, message schemas, drawing operations,
+#' the resize protocol, font metrics, and multi-session routing.
 #' @return Invisible `NULL`. The device is opened as a side effect.
+#' @seealso [`jgd_spec`] for the protocol specification;
+#'   [jgd_ext()] and [with_jgd_ext()] for renderer extensions.
 #' @examplesIf interactive()
 #' # Requires a running renderer (e.g., VS Code extension or Deno server).
 #' # See the "Displaying plots" section above.
@@ -195,7 +204,7 @@ jgd_discover = function() {
 #' @section Lifecycle:
 #' **Experimental.** This API may change in future versions.
 #' @seealso [with_jgd_ext()], [jgd_frame_ext()], [jgd_begin_group()],
-#'   [jgd_spec]
+#'   [`jgd_spec`]
 #' @examplesIf interactive()
 #' jgd()
 #'

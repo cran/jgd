@@ -1,3 +1,18 @@
+# jgd 0.1.1
+
+## Internals
+
+- Fixed potential GC protection issues in the C internals (flagged by
+  `rchk`) by tightening `PROTECT`/`UNPROTECT` handling around allocations
+  in `replay_snapshot` and `C_jgd_discover`. (#61)
+
+## Documentation
+
+- Improved visibility of protocol specification. (#58)
+- Minor documentation updates reflecting the fact that our VS Code
+  functionality has been absorbed into the main/upstream VS Code R extension.
+  (<https://github.com/REditorSupport/vscode-R/pull/1706>).
+
 # jgd 0.1.0
 
 Initial CRAN release.

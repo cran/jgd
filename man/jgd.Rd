@@ -31,12 +31,13 @@ renderer (e.g. VS Code extension or browser) over a Unix domain socket.
 It is important to note that \code{jgd()} does not display any plots; it only
 streams them (i.e., converts them to a format that a JSON renderer
 understands). To actually \emph{display} your plots with \code{jgd}, you'll need an
-appropriate frontend. We provide two official renderers, both available for
-install from the project repository:
-\url{https://github.com/grantmcdermott/jgd}.
+appropriate frontend. Two official renderers are available:
 \itemize{
-\item \strong{VS Code extension.} An integrated plot pane for VS Code.
-\item \strong{Deno server.} A standalone browser-based renderer.
+\item \strong{VS Code.} Native \code{jgd} support is built into the VS Code R extension
+(\url{https://github.com/REditorSupport/vscode-R}), which handles device
+activation for you.
+\item \strong{Deno server.} A standalone browser-based renderer, available from the
+project repository: \url{https://github.com/grantmcdermott/jgd}.
 }
 
 Users aren't limited to these two options. The \code{jgd} protocol is deliberately
@@ -53,6 +54,15 @@ details about \code{newPage}, \code{flush_frame}, and \code{poll_resize} events,
 is useful for diagnosing resize/replay issues.
 }
 
+\section{Protocol specification}{
+
+The jgd protocol is a simple, versioned JSONL wire format designed to be
+frontend-agnostic. You can use it to build your own renderer (e.g., for
+Neovim, Emacs, or a custom web app). See \code{\link{jgd_spec}} for the complete
+specification covering transports, message schemas, drawing operations,
+the resize protocol, font metrics, and multi-session routing.
+}
+
 \examples{
 \dontshow{if (interactive()) withAutoprint(\{ # examplesIf}
 # Requires a running renderer (e.g., VS Code extension or Deno server).
@@ -64,4 +74,8 @@ lines(1:10, col = "red", lwd = 3)
 hist(rnorm(1000), col = "steelblue")
 dev.off()
 \dontshow{\}) # examplesIf}
+}
+\seealso{
+\code{\link{jgd_spec}} for the protocol specification;
+\code{\link[=jgd_ext]{jgd_ext()}} and \code{\link[=with_jgd_ext]{with_jgd_ext()}} for renderer extensions.
 }
