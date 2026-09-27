@@ -1,6 +1,6 @@
 Package: jgd
 Title: JSON Graphics Device
-Version: 0.1.1
+Version: 0.2.0
 Authors@R: c(
         person("Grant", "McDermott", role = c("aut", "cre"),
             email = "contact@grantmcdermott.com"),
@@ -23,15 +23,15 @@ Encoding: UTF-8
 NeedsCompilation: yes
 Suggests: callr, ggplot2, jsonlite, processx, testthat (>= 3.0.0),
         withr
-URL: https://github.com/grantmcdermott/jgd
-BugReports: https://github.com/grantmcdermott/jgd/issues
+URL: https://github.com/REditorSupport/jgd
+BugReports: https://github.com/REditorSupport/jgd/issues
 Config/testthat/edition: 3
-Config/roxygen2/version: 8.0.0
-Packaged: 2026-06-30 21:36:51 UTC; gmcd
+Config/roxygen2/version: 8.1.0
+Packaged: 2026-09-27 19:26:24 UTC; grant
 Author: Grant McDermott [aut, cre],
   Tatsuya Shima [aut],
   Dave Gamble [cph] (cJSON library in src/cjson/),
   cJSON contributors [cph] (cJSON library in src/cjson/)
 Maintainer: Grant McDermott <contact@grantmcdermott.com>
 Repository: CRAN
-Date/Publication: 2026-06-30 23:40:02 UTC
+Date/Publication: 2026-09-27 19:50:09 UTC
