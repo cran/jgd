@@ -1,7 +1,7 @@
-0f89a9232e3e91cf6fa60f559f51d880 *DESCRIPTION
+482f307378875bcc19d2bf84f754bce8 *DESCRIPTION
 cbd2105534e2a5029388cc18fac2bc5b *LICENSE
 5d595f18ce236b81b3207f3c5fd23f67 *NAMESPACE
-13688691a9ab163013600bf7c7f63ed2 *NEWS.md
+ea98f04e69f3df6b970d5204e00c2625 *NEWS.md
 80a64e60fe87cf1134daf7f79ce85e2a *R/jgd-package.R
 cc25c70bdf04802821516236a2b69e30 *R/jgd.R
 a007a7646e4b32dc2d6efc45a774537f *R/spec.R
@@ -48,7 +48,7 @@ c75de455942390e26ccfa19df0b73bfc *src/transport.c
 8b270aebd81bf4b8f37ef6f0a1b41394 *tests/testthat/_snaps/device-basic.md
 33cda093e9fcf122c0f6b7ce7a2889bf *tests/testthat/_snaps/frame-output.md
 a2fb209bda88571b19c8049cb74e7ec4 *tests/testthat/_snaps/malformed-json.md
-798f5330f21564c0d3dfb4b8d29381cf *tests/testthat/helper-mock-server.R
+d55c0ba044b2562d742b7e5422943564 *tests/testthat/helper-mock-server.R
 127db50cc80e1a5610d32f7a5150aee4 *tests/testthat/setup.R
 795d7588c08a4c1065e505c24345301b *tests/testthat/test-device-basic.R
 5e7666e302dc94a74a8badff0031d15e *tests/testthat/test-discovery.R
@@ -57,6 +57,7 @@ b4a6f88c6292ef6eefc42302ec957871 *tests/testthat/test-frame-ext.R
 7ed2633ccad2bbdc75f42af6383f51f9 *tests/testthat/test-frame-output.R
 3fbf294cec972c623857b1a6af556db6 *tests/testthat/test-group-ops.R
 4c21d890e8c06ce7b8403c03655f5ab0 *tests/testthat/test-malformed-json.R
+35ea689700a36bd75f317e854eea2f8d *tests/testthat/test-mock-server.R
 3fda965a8841807c55ca1bd5155b93a8 *tests/testthat/test-plotindex-buffering.R
 75214ea67d4780d2e12eab8ad3246470 *tests/testthat/test-resize-plotindex-content.R
 8fcd57f6f9038ff2de197afa09e5f666 *tests/testthat/test-resize-plotindex-lines.R
